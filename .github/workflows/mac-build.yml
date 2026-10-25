@@ -1,5 +1,5 @@
 # Save as .github/workflows/mac-build.yml in YOUR FORK of fritzing/fritzing-app
-# (replace the earlier draft). Builds an Apple Silicon (arm64) Fritzing.app + DMG.
+# (replace the earlier version). Builds an Apple Silicon (arm64) Fritzing.app + DMG.
 # Dependency layout is taken from the repo's pri/*detect.pri files.
 name: Build Fritzing (macOS)
 
@@ -29,8 +29,8 @@ jobs:
           modules: "qt5compat qtserialport"
           cache: true
 
-      - name: Install Homebrew packages (clipper, ngspice, cmake)
-        run: brew install clipper ngspice cmake
+      - name: Install Homebrew packages (ngspice, cmake)
+        run: brew install ngspice cmake
 
       - name: Boost 1.85.0 (headers)
         run: |
@@ -47,16 +47,26 @@ jobs:
             || git clone --depth 1 https://github.com/svgpp/svgpp.git svgpp-1.3.1
           ls svgpp-1.3.1/include
 
-      - name: Clipper1 and ngspice (symlink Homebrew installs to expected names)
+      - name: Clipper1 6.4.2 (build from source)
         run: |
           set -euxo pipefail
           cd "$WS"
-          CL="$(brew --prefix clipper)"
-          mkdir Clipper1-6.4.2
-          ln -s "$CL/include" Clipper1-6.4.2/include
-          ln -s "$CL/lib"     Clipper1-6.4.2/lib
+          curl -fL -o clipper.zip https://sourceforge.net/projects/polyclipping/files/clipper_ver6.4.2.zip/download
+          mkdir clipper-src && unzip -q clipper.zip -d clipper-src
+          CPPDIR="$(dirname "$(find clipper-src -path '*cpp/CMakeLists.txt' | head -1)")"
+          echo "Clipper source dir: $CPPDIR"
+          cmake -S "$CPPDIR" -B clipper-build \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_INSTALL_PREFIX="$WS/Clipper1-6.4.2"
+          cmake --build clipper-build --target install -j"$(sysctl -n hw.ncpu)"
           ls Clipper1-6.4.2/include/polyclipping/clipper.hpp
-          ls Clipper1-6.4.2/lib | grep polyclipping
+          ls Clipper1-6.4.2/lib
+
+      - name: ngspice headers (symlink Homebrew install)
+        run: |
+          set -euxo pipefail
+          cd "$WS"
           ln -s "$(brew --prefix ngspice)" ngspice-42
           find ngspice-42/include -name 'sharedspice.h'
 
