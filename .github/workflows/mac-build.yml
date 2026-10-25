@@ -1,74 +1,135 @@
-# Save as .github/workflows/mac-build.yml in YOUR FORK of fritzing/fritzing-app.
-# Draft scaffold: dependency detection and the deploy script's arguments were not
-# verified. Run it, read the "Diagnostics" step output, and adjust.
+# Save as .github/workflows/mac-build.yml in YOUR FORK of fritzing/fritzing-app
+# (replace the earlier draft). Builds an Apple Silicon (arm64) Fritzing.app + DMG.
+# Dependency layout is taken from the repo's pri/*detect.pri files.
 name: Build Fritzing (macOS)
 
 on:
   workflow_dispatch:
     inputs:
       parts_ref:
-        description: "fritzing-parts branch/tag"
-        default: "develop"
+        description: "fritzing-parts branch (release builds use master)"
+        default: "master"
 
 jobs:
   build:
-    runs-on: macos-latest        # Apple Silicon (arm64)
-    timeout-minutes: 120
+    runs-on: macos-latest        # Apple Silicon
+    timeout-minutes: 150
+    env:
+      WS: ${{ github.workspace }}
     steps:
-      - name: Checkout fritzing-app (into subfolder so deps can be siblings)
+      - name: Checkout fritzing-app (subfolder, so dependencies can be siblings)
         uses: actions/checkout@v4
         with:
           path: fritzing-app
 
-      - name: Install Qt 6.5.x
+      - name: Install Qt 6.5.3
         uses: jurplel/install-qt-action@v4
         with:
           version: "6.5.3"
           modules: "qt5compat qtserialport"
           cache: true
 
-      - name: Install Homebrew dependencies
-        run: brew install boost libgit2 openssl@3 cmake ngspice || true
+      - name: Install Homebrew packages (clipper, ngspice, cmake)
+        run: brew install clipper ngspice cmake
 
-      - name: Fetch sibling source dependencies
+      - name: Boost 1.85.0 (headers)
         run: |
-          git clone --depth 1 https://github.com/svgpp/svgpp.git svgpp
-          git clone --depth 1 https://github.com/fritzing/fritzing-parts.git \
-            -b "${{ inputs.parts_ref }}" fritzing-parts
-          # QuaZip must be built against the same Qt as Fritzing
-          git clone --depth 1 https://github.com/stachenov/quazip.git quazip-src
-          cmake -S quazip-src -B quazip-build -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-            -DQUAZIP_QT_MAJOR_VERSION=6 -DCMAKE_BUILD_TYPE=Release
-          cmake --build quazip-build -j"$(sysctl -n hw.ncpu)"
-          # TODO: PolyClipper/Clipper1 and ngspice paths -- see Diagnostics output
+          set -euxo pipefail
+          cd "$WS"
+          curl -fL https://archives.boost.io/release/1.85.0/source/boost_1_85_0.tar.bz2 | tar xj
+          ls boost_1_85_0/boost | head -3
 
-      - name: Diagnostics (what the build expects)
+      - name: svgpp 1.3.1
+        run: |
+          set -euxo pipefail
+          cd "$WS"
+          git clone --depth 1 --branch v1.3.1 https://github.com/svgpp/svgpp.git svgpp-1.3.1 \
+            || git clone --depth 1 https://github.com/svgpp/svgpp.git svgpp-1.3.1
+          ls svgpp-1.3.1/include
+
+      - name: Clipper1 and ngspice (symlink Homebrew installs to expected names)
+        run: |
+          set -euxo pipefail
+          cd "$WS"
+          CL="$(brew --prefix clipper)"
+          mkdir Clipper1-6.4.2
+          ln -s "$CL/include" Clipper1-6.4.2/include
+          ln -s "$CL/lib"     Clipper1-6.4.2/lib
+          ls Clipper1-6.4.2/include/polyclipping/clipper.hpp
+          ls Clipper1-6.4.2/lib | grep polyclipping
+          ln -s "$(brew --prefix ngspice)" ngspice-42
+          find ngspice-42/include -name 'sharedspice.h'
+
+      - name: libgit2 1.7.1 (static, arm64)
+        run: |
+          set -euxo pipefail
+          cd "$WS"
+          git clone --depth 1 --branch v1.7.1 https://github.com/libgit2/libgit2.git libgit2-src
+          cmake -S libgit2-src -B libgit2-build \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=OFF \
+            -DUSE_SSH=OFF -DUSE_HTTPS=SecureTransport -DREGEX_BACKEND=builtin \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX="$WS/libgit2-1.7.1"
+          cmake --build libgit2-build --target install -j"$(sysctl -n hw.ncpu)"
+          ls libgit2-1.7.1/lib/libgit2.a
+
+      - name: QuaZip 1.4 (built against our Qt)
+        run: |
+          set -euxo pipefail
+          cd "$WS"
+          QTV="$("$QT_ROOT_DIR/bin/qmake" -query QT_VERSION)"
+          echo "Qt version: $QTV"
+          git clone --depth 1 --branch v1.4 https://github.com/stachenov/quazip.git quazip-src
+          cmake -S quazip-src -B quazip-build \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DQUAZIP_QT_MAJOR_VERSION=6 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX="$WS/quazip-$QTV-1.4"
+          cmake --build quazip-build --target install -j"$(sysctl -n hw.ncpu)"
+          ls "quazip-$QTV-1.4/lib" "quazip-$QTV-1.4/include"
+
+      - name: Build Fritzing
         working-directory: fritzing-app
         run: |
-          echo "=== phoenix.pro (head) ==="; sed -n '1,120p' phoenix.pro
-          echo "=== pri/*detect.pri ==="; for f in pri/*detect.pri; do echo "--- $f"; cat "$f"; done
-          echo "=== tools/deploy_fritzing_mac.sh ==="; cat tools/deploy_fritzing_mac.sh
-          ls -la ..
+          set -euxo pipefail
+          # The quazip detect file as shown in the log had stray text after the path; strip it if present.
+          sed -i '' 's/QUAZIP_VERSION)intuisphere/QUAZIP_VERSION)/' pri/quazipdetect.pri
+          grep -n "QUAZIP_PATH=" pri/quazipdetect.pri
+          "$QT_ROOT_DIR/bin/qmake" -after "QMAKE_APPLE_DEVICE_ARCHS=arm64" \
+            "boost_root=$WS/boost_1_85_0" -o Makefile phoenix.pro
+          make -j"$(sysctl -n hw.ncpu)" release
+          ls -la "$WS/release64"
 
-      - name: Build and package via the project's own Mac script
+      - name: Assemble app, parts database, DMG (replaces tools/deploy_fritzing_mac.sh)
         working-directory: fritzing-app
-        env:
-          QTBIN: ${{ env.QT_ROOT_DIR }}/bin
         run: |
-          # Check the script header in Diagnostics for required arguments/env vars.
-          bash tools/deploy_fritzing_mac.sh
-
-      - name: Locate build output
-        run: |
-          find "$GITHUB_WORKSPACE" "$HOME" /tmp /Users/runner -maxdepth 6 \
-            \( -name "*.dmg" -o -name "Fritzing.app" -o -name "Fritzing*.zip" \) \
-            -not -path "*/node_modules/*" 2>/dev/null || true
+          set -euxo pipefail
+          DEPLOY="$WS/deploy-app"
+          rm -rf "$DEPLOY"; mkdir "$DEPLOY"
+          cp -R "$WS/release64/Fritzing.app" "$DEPLOY/"
+          MACOS="$DEPLOY/Fritzing.app/Contents/MacOS"
+          ls -la "$MACOS"
+          cp -rf sketches help translations INSTALL.txt README.md \
+            LICENSE.CC-BY-SA LICENSE.GPL2 LICENSE.GPL3 "$MACOS/"
+          rm -f "$MACOS"/translations/*.ts
+          find "$MACOS/translations" -name "*.qm" -size -128c -delete
+          git clone --depth 1 --branch "${{ inputs.parts_ref }}" \
+            https://github.com/fritzing/fritzing-parts.git "$MACOS/fritzing-parts"
+          # Build the parts database (needs no display)
+          cd "$MACOS"
+          QT_QPA_PLATFORM=offscreen ./Fritzing -db "fritzing-parts/parts.db"
+          ls -la fritzing-parts/parts.db
+          # Bundle Qt and the other libraries, then ad-hoc sign (required on Apple Silicon)
+          cd "$DEPLOY"
+          QUAZIP_LIB="$(echo "$WS"/quazip-*-1.4/lib)"
+          "$QT_ROOT_DIR/bin/macdeployqt" Fritzing.app -verbose=1 \
+            -libpath="$QUAZIP_LIB" -libpath="$WS/Clipper1-6.4.2/lib"
+          codesign --force --deep -s - Fritzing.app
+          hdiutil create -volname Fritzing -srcfolder Fritzing.app -ov -format UDZO Fritzing.dmg
+          ls -la "$DEPLOY"
 
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
           name: fritzing-macos
-          path: |
-            **/*.dmg
-            **/Fritzing.app
-          if-no-files-found: warn
+          path: ${{ github.workspace }}/deploy-app/Fritzing.dmg
+          if-no-files-found: error
