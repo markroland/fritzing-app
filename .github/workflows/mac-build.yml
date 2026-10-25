@@ -1,0 +1,68 @@
+# Save as .github/workflows/mac-build.yml in YOUR FORK of fritzing/fritzing-app.
+# Draft scaffold: dependency detection and the deploy script's arguments were not
+# verified. Run it, read the "Diagnostics" step output, and adjust.
+name: Build Fritzing (macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      parts_ref:
+        description: "fritzing-parts branch/tag"
+        default: "develop"
+
+jobs:
+  build:
+    runs-on: macos-latest        # Apple Silicon (arm64)
+    timeout-minutes: 120
+    steps:
+      - name: Checkout fritzing-app (into subfolder so deps can be siblings)
+        uses: actions/checkout@v4
+        with:
+          path: fritzing-app
+
+      - name: Install Qt 6.5.x
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.5.3"
+          modules: "qt5compat qtserialport"
+          cache: true
+
+      - name: Install Homebrew dependencies
+        run: brew install boost libgit2 openssl@3 cmake ngspice || true
+
+      - name: Fetch sibling source dependencies
+        run: |
+          git clone --depth 1 https://github.com/svgpp/svgpp.git svgpp
+          git clone --depth 1 https://github.com/fritzing/fritzing-parts.git \
+            -b "${{ inputs.parts_ref }}" fritzing-parts
+          # QuaZip must be built against the same Qt as Fritzing
+          git clone --depth 1 https://github.com/stachenov/quazip.git quazip-src
+          cmake -S quazip-src -B quazip-build -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
+            -DQUAZIP_QT_MAJOR_VERSION=6 -DCMAKE_BUILD_TYPE=Release
+          cmake --build quazip-build -j"$(sysctl -n hw.ncpu)"
+          # TODO: PolyClipper/Clipper1 and ngspice paths -- see Diagnostics output
+
+      - name: Diagnostics (what the build expects)
+        working-directory: fritzing-app
+        run: |
+          echo "=== phoenix.pro (head) ==="; sed -n '1,120p' phoenix.pro
+          echo "=== pri/*detect.pri ==="; for f in pri/*detect.pri; do echo "--- $f"; cat "$f"; done
+          echo "=== tools/deploy_fritzing_mac.sh ==="; cat tools/deploy_fritzing_mac.sh
+          ls -la ..
+
+      - name: Build and package via the project's own Mac script
+        working-directory: fritzing-app
+        env:
+          QTBIN: ${{ env.QT_ROOT_DIR }}/bin
+        run: |
+          # Check the script header in Diagnostics for required arguments/env vars.
+          bash tools/deploy_fritzing_mac.sh
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: fritzing-macos
+          path: |
+            **/*.dmg
+            **/Fritzing.app
+          if-no-files-found: warn
