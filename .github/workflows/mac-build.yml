@@ -58,6 +58,12 @@ jobs:
           # Check the script header in Diagnostics for required arguments/env vars.
           bash tools/deploy_fritzing_mac.sh
 
+      - name: Locate build output
+        run: |
+          find "$GITHUB_WORKSPACE" "$HOME" /tmp /Users/runner -maxdepth 6 \
+            \( -name "*.dmg" -o -name "Fritzing.app" -o -name "Fritzing*.zip" \) \
+            -not -path "*/node_modules/*" 2>/dev/null || true
+
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
